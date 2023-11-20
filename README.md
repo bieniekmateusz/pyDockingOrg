@@ -6,3 +6,4 @@ Please make sure you are allowed to use this interface in the same way that you'
 Updates:
  - Callback-driven requests
  - Threading for handling volume search
+ - Default 3-attempt retry strategy to tackle the random HTTP 502 
