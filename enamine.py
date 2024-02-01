@@ -1,12 +1,14 @@
 """
-Based on Python_SmallWorld_API from Matteo Ferla.
+Based on Python_SmallWorld_API from Matteo Ferla 
+(https://python-smallworld-api.readthedocs.io/en/latest/index.html)
 
 Changes:
  - hooks handle events
  - a session is shared for simultaneous requests using threading
 """
 import requests
-import subprocess
+import warnings
+from typing import Iterable
 import re
 import json
 import pandas as pd
@@ -14,9 +16,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib3.util import Retry
 from requests.adapters import HTTPAdapter
+import atexit
 
 
 class Enamine:
+
+    # Use this Class variable to relay settings for static methods
+    _session = None
+    RESULTS_PER_SEARCH = 100
+
     # columns necessary for downloading the data from https://sw.docking.org/search/view
     VALID_COLUMNS = {'columns[0][data]': '0', 'columns[0][name]': 'alignment', 'columns[0][searchable]': 'true',
         'columns[0][orderable]': 'false', 'columns[0][search][value]': '', 'columns[0][search][regex]': 'false',
@@ -59,32 +67,57 @@ class Enamine:
     VALID_COLUMN_NAMES = [v for p, v in VALID_COLUMNS.items() if '[name]' in p]
 
     # specify the database
-    SEARCH_PARAMS = {'db': 'REAL-Database-22Q1.smi.anon', 'dist': 5, 'tdn': 6, 'rdn': 6, 'rup': 2, 'ldn': 2, 'lup': 2,
-                     'maj': 6, 'min': 6, 'sub': 6, 'sdist': 12, 'tup': 6, 'scores': 'Atom Alignment,ECFP4,Daylight'}
+    SEARCH_PARAMS = [('db', 'REAL-Database-22Q1.smi.anon'), ('dist', 5), ('tdn', 6), ('rdn', 6), ('rup', 2),
+                     ('ldn', 2), ('lup', 2), ('maj', 6), ('min', 6), ('sub', 6), ('sdist', 12), ('tup', 6),
+                     ('scores', 'Atom Alignment,ECFP4,Daylight')]
 
     def __init__(self):
-        Enamine.session = requests.Session()
+        self._init_session_request()
+        atexit.register(self._close_enamine_session)
+
+    @staticmethod
+    def _init_session_request():
+        Enamine._session = requests.Session()
 
         # add retries, the server fails sometimes which appears to be internal crashes
         retries = Retry(
             total=3,
             backoff_factor=0.1,
-            status_forcelist=[500, 502],
+            status_forcelist=[500, 502, 504],
             allowed_methods={'GET'},
         )
-        Enamine.session.mount('https://', HTTPAdapter(max_retries=retries))
+        Enamine._session.mount('https://', HTTPAdapter(max_retries=retries))
+
+    def __enter__(self):
+        Enamine._init_session_request()
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._close_enamine_session()
+
+    def _close_enamine_session(self):
+        if Enamine._session is not None:
+            Enamine._session.close()
 
     @staticmethod
     def parse_hitlist_results(response, *args, **kwargs):
+        response.enamine_results = pd.DataFrame({})
         try:
             if not response.json()["recordsTotal"]:
-                raise Exception(f'There are {response.json()["recordsTotal"]} hits in the reply')
+                warnings.warn(f'There are {response.json()["recordsTotal"]} hits in the reply')
+                return
+
+            reply_data = response.json()['data']
+            if not reply_data:
+                warnings.warn('There is no `data` in the reply!')
+                return
         except requests.exceptions.ChunkedEncodingError:
             pass
-
-        reply_data = response.json()['data']
-        if not reply_data:
-            raise Exception('There is no `data` in the reply!')
+        except requests.exceptions.JSONDecodeError as E:
+            warnings.warn("Parsing molecules from a hitlist  has failed due to: " + str(E))
+            return
+        except KeyError as E:
+            warnings.warn("Could not access the key: " + str(E))
+            return
 
         # expand the first column
         df1 = pd.DataFrame([row[0] for row in reply_data])
@@ -100,7 +133,7 @@ class Enamine:
     @staticmethod
     def parse_lookup_query(response, *args, **kwargs):
         # set the results to be empty in case something goes wrong
-        response.enamine_results = list()
+        response.enamine_results = [pd.DataFrame({})]
 
         hit_list_id = set()
         try:
@@ -124,59 +157,207 @@ class Enamine:
             # occasionally the returned results are empty
             return
 
-        assert len(hit_list_id) == 1, hit_list_id
-        params = {"hlid": hit_list_id.pop(), "start": 0, "length": 300, "draw": 0}
-        params = {**params, **Enamine.VALID_COLUMNS}
+        for hit_id in hit_list_id:
+            params = {"hlid": hit_id, "start": 0, "length": Enamine.RESULTS_PER_SEARCH, "draw": 0}
+            params = {**params, **Enamine.VALID_COLUMNS}
 
-        response_molecules: requests.Response = Enamine.session.get(
+            response_molecules: requests.Response = Enamine._session.get(
+                url='https://sw.docking.org/search/view',
+                params=params,
+                stream=True,
+                timeout=60,  # seconds
+                hooks={"response": Enamine.parse_hitlist_results}
+            )
+
+            # return the reply back by attaching it to the response
+            response.enamine_results.append(response_molecules.enamine_results)
+
+    @staticmethod
+    def parse_lookup_query_v2(response, *args, **kwargs):
+        response.enamine_results = pd.DataFrame({})
+        try:
+            if not response.json()["recordsTotal"]:
+                warnings.warn(f'There are {response.json()["recordsTotal"]} hits in the reply')
+                return
+
+            reply_data = response.json()['data']
+            if not reply_data:
+                raise Exception('There is no `data` in the reply!')
+        except requests.exceptions.ChunkedEncodingError:
+            pass
+        except requests.exceptions.JSONDecodeError as E:
+            warnings.warn("Parsing molecules from a hitlist  has failed due to: " + str(E))
+            return
+        except KeyError as E:
+            warnings.warn("Could not access the key: " + str(E))
+            return
+
+        # expand the first column
+        df1 = pd.DataFrame([row[0] for row in reply_data])
+        if len(df1) == 0:
+            raise Exception('Reply generated an empty table')
+        # I don't know what the columns represent in the new interface, but these columns are not used for now
+        df2 = pd.DataFrame([row[1:] for row in reply_data], columns=["qrySmiles", "fp", "similarity", "c1", "c2", "c3", "c4", "c5"])
+
+        df = pd.concat([df1, df2], axis=1)
+        df['name'] = df.hitSmiles.str.split(expand=True)[1]
+        df['smiles'] = df.hitSmiles.str.split(expand=True)[0]
+        response.enamine_results = df
+
+    @staticmethod
+    def get_molecules_v2(smiles):
+        reply: requests.Response = Enamine._session.get(
             url='https://sw.docking.org/search/view',
-            params=params,
+                params=[('db', 'REAL-Database-22Q1.smi.anon'),
+                        ('dist', 5),
+                        ('tdn', 6),
+                        ('rdn', 6),
+                        ('rup', 2),
+                        ('ldn', 2),
+                        ('lup', 2),
+                        ('maj', 6),
+                        ('min', 6),
+                        ('sub', 6),
+                        ('sdist', 12),
+                        ('tup', 6),
+                        ('fmt', 'json'),
+                        ('scores', 'Atom Alignment,ECFP4,Daylight')
+                        ]
+                       +
+                       [('smi', smi) for smi in smiles],
             stream=True,
             timeout=60,  # seconds
-            hooks={"response": Enamine.parse_hitlist_results}
-        )
-
-        # return the reply back by attaching it to the response
-        response.enamine_results = response_molecules.enamine_results
+            hooks={'response': Enamine.parse_lookup_query_v2}
+            )
+        return reply.enamine_results
 
     @staticmethod
     def get_molecules(smiles):
-        reply: requests.Response = Enamine.session.get(
+        reply: requests.Response = Enamine._session.get(
             url='https://sw.docking.org/search/submit',
-            params={**Enamine.SEARCH_PARAMS, 'smi': smiles},
+                params=Enamine.SEARCH_PARAMS +  [('smi', smiles)],
             stream=True,
             timeout=60,  # seconds
             hooks={'response': Enamine.parse_lookup_query}
             )
-        return reply.enamine_results
+        return pd.concat(reply.enamine_results)
+
+    @staticmethod
+    def get_molecules_batch(smiles):
+        reply: requests.Response = Enamine._session.get(
+            url='https://sw.docking.org/search/submit',
+                params=Enamine.SEARCH_PARAMS +  [('smi', smi) for smi in smiles],
+            stream=True,
+            timeout=60,  # seconds
+            hooks={'response': Enamine.parse_lookup_query}
+            )
+        return pd.concat(reply.enamine_results)
 
     def close(self):
-        Enamine.session.close()
+        Enamine._session.close()
 
-    def search_smiles(self, smiles, results_per_smile=300, workers=10):
+    def search_smiles_v2(self, smiles: Iterable[str], remove_duplicates=False, max_workers=5):
+        """
+        Search
+        Args:
+            smiles: a bag of smiles that you'd like to search for
+            remove_duplicates: ensure the found Smiles are unique. If the same Smiles were found with different query smiles,
+                remove the duplicates. This means you will not be able to recover which Smiles led to
+
+        Returns:
+
+        """
         start = time.time()
-        with ThreadPoolExecutor(workers=100) as pool:
+
+        # batch smiles together and query the server 20 miles per call
+        from more_itertools import chunked
+
+        dfs = [Enamine.get_molecules_v2(batch) for batch in chunked(smiles, 20)]
+
+        mols = pd.concat(dfs)
+
+        if remove_duplicates:
+            mols.drop_duplicates(subset='id', inplace=True)
+
+        print(f"Found {len(mols)} in {time.time() - start}")
+        return mols
+
+    def search_smiles(self, smiles: Iterable[str], remove_duplicates=False, max_workers=1):
+        """
+        Search
+        Args:
+            smiles: a bag of smiles that you'd like to search for
+            remove_duplicates: ensure the found Smiles are unique. If the same Smiles were found with different query smiles,
+                remove the duplicates. This means you will not be able to recover which Smiles led to
+
+        Returns:
+
+        """
+
+        # set this to be used later in the calls
+        Enamine.RESULTS_PER_SEARCH = 100
+
+        start = time.time()
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             dfs = list(pool.map(Enamine.get_molecules, smiles))
 
-        mols = pd.concat([df for df in dfs if len(df) > 0])
+        mols = pd.concat(dfs)
+
+        if remove_duplicates:
+            mols.drop_duplicates(subset='id', inplace=True)
+
+        print(f"Found {len(mols)} in {time.time() - start}")
+        return mols
+
+    def search_smiles_batch(self, smiles: Iterable[str], remove_duplicates=False, max_workers=5):
+        """
+        Search
+        Args:
+            smiles: a bag of smiles that you'd like to search for
+            remove_duplicates: ensure the found Smiles are unique. If the same Smiles were found with different query smiles,
+                remove the duplicates. This means you will not be able to recover which Smiles led to
+
+        Returns:
+
+        """
+        # for each smile search take 100 smiles
+        Enamine.RESULTS_PER_SEARCH = 20_000
+
+        start = time.time()
+
+        # batch smiles together and query the server 20 miles per call
+        from more_itertools import chunked
+
+        dfs = [Enamine.get_molecules(batch) for batch in chunked(smiles, 20)]
+
+        mols = pd.concat(dfs)
+
+        if remove_duplicates:
+            mols.drop_duplicates(subset='id', inplace=True)
+
         print(f"Found {len(mols)} in {time.time() - start}")
         return mols
 
 
-if __name__ == '__main__':
+
+def test_duplicates():
     enamine = Enamine()
 
-    smiles_to_search = list(pd.read_csv('it62_best_smiles_to_scan.csv').Smiles)[:5]
-    # smiles_to_search = ['O=C(C)Oc1ccccc1C(=O)O', 'C=C(Cl)CNC(=O)C1(CC)CCC1', 'C=C(Cl)CNC(=O)C1(CC)CCC1']
-    mols = enamine.search_smiles(smiles_to_search)
+    # note the duplicate query Smiles
+    smiles_to_search = ['O=C(C)Oc1ccccc1C(=O)O', 'C=C(Cl)CNC(=O)C1(CC)CCC1', 'C=C(Cl)CNC(=O)C1(CC)CCC1']
+    mols = enamine.search_smiles(smiles_to_search, remove_duplicates=True)
+
+    assert len(mols) <= 230 # assumes 100 results per search, the extra 30 is for the randomness
+
     print(mols)
 
-    def obabel_protonate(smi):
-    	return subprocess.run(['obabel', f'-:{smi}', '-osmi', '-p', '7', '-xh'], capture_output=True).stdout.decode().strip()
-
-    mols['hitSmiles'] = mols['hitSmiles'].map(obabel_protonate)
-
-    for i, m in mols.iterrows():
-    	print(m.Smiles)
-
     enamine.close()
+
+if __name__ == '__main__':
+    # test_duplicates()
+
+    with Enamine() as enamine:
+        mols = enamine.search_smiles(
+            ['O=C(C)Oc1ccccc1C(=O)O', 'C=C(Cl)CNC(=O)C1(CC)CCC1'], 
+            remove_duplicates=True)
+        print(mols)
