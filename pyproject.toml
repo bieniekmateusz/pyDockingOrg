@@ -16,6 +16,7 @@ classifiers = [
 keywords = ["Enamine database"]
 dependencies = [
     "pandas",
+    "requests"
 ]
 requires-python = ">=3.9"
 
