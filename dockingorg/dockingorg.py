@@ -91,6 +91,7 @@ class Enamine:
     def __enter__(self):
         Enamine._init_session_request()
         return self
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._close_enamine_session()
 
@@ -286,13 +287,15 @@ class Enamine:
         """
         Search
         Args:
-            smiles: a bag of smiles that you'd like to search for
+            smiles: a list of smiles that you'd like to search for
             remove_duplicates: ensure the found Smiles are unique. If the same Smiles were found with different query smiles,
                 remove the duplicates. This means you will not be able to recover which Smiles led to
 
         Returns:
-
         """
+
+        if type(smiles) is str:
+            smiles = [smiles]
 
         # set this to be used later in the calls
         Enamine.RESULTS_PER_SEARCH = 100
