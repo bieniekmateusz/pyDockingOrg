@@ -11,12 +11,13 @@ import warnings
 from typing import Iterable
 import re
 import json
-import pandas as pd
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib3.util import Retry
 from requests.adapters import HTTPAdapter
 import atexit
+
+import pandas as pd
 
 
 class Enamine:
