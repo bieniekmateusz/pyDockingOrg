@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dockingorg"
 version = "1.0.0"
-description = "A python interface to query sw.docking.org for Enamine structures. "
+description = "A (now old) python interface to query sw.docking.org for Enamine structures based on Matteo Ferla work. "
 readme = "README.md"
 authors = [{ name = "Mateusz bieniek", email = "bieniekmat@gmail.com" }]
 license = { file = "LICENSE" }
