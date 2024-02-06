@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyDockingOrg"
-version = "1.0.2"
+version = "1.0.3"
 description = "A python interface to query sw.docking.org for Enamine structures based on Matteo Ferla work. This is the old interface that uses two interations (hit lists) to get results. "
 readme = "README.md"
 authors = [{ name = "Mateusz bieniek", email = "bieniekmat@gmail.com" }]
