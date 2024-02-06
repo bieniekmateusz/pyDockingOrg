@@ -284,7 +284,7 @@ class Enamine:
         print(f"Found {len(mols)} in {time.time() - start}")
         return mols
 
-    def search_smiles(self, smiles: Iterable[str], remove_duplicates=False, max_workers=1):
+    def search_smiles(self, smiles: Iterable[str], remove_duplicates=False, max_workers=1, results_per_search=100):
         """
         Search
         Args:
@@ -299,7 +299,7 @@ class Enamine:
             smiles = [smiles]
 
         # set this to be used later in the calls
-        Enamine.RESULTS_PER_SEARCH = 100
+        Enamine.RESULTS_PER_SEARCH = results_per_search
 
         start = time.time()
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
